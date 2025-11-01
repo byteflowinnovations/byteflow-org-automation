@@ -1,7 +1,7 @@
 name: Reusable - Pending Jobs Kanban
 
 on:
-  workflow_call:  # This allows other repos to invoke it
+  workflow_call:
     secrets:
       GITHUB_TOKEN:
         required: true
@@ -9,6 +9,10 @@ on:
 jobs:
   build-kanban:
     runs-on: ubuntu-latest
+
+    permissions:
+      issues: write
+      contents: read
 
     steps:
       - name: Check out repo
@@ -19,4 +23,88 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // [Same Kanban logic from previous workflow goes here]
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const endOfWeek = new Date(today);
+            endOfWeek.setDate(today.getDate() + 7);
+
+            const groups = {
+              "🟥 Over-Due": [],
+              "🟧 Due-Today": [],
+              "🟨 Due-This Week": [],
+              "🟩 Due-Upcoming Weeks": []
+            };
+
+            for (const issue of issues) {
+              const match = issue.body?.match(/Due Date:\s*(\d{4}-\d{2}-\d{2})/);
+              if (!match) continue;
+
+              const dueStr = match[1];
+              const dueDate = new Date(dueStr);
+
+              if (dueDate < today) {
+                groups["🟥 Over-Due"].push({ ...issue, due: dueStr });
+              } else if (dueDate.toDateString() === today.toDateString()) {
+                groups["🟧 Due-Today"].push({ ...issue, due: dueStr });
+              } else if (dueDate > today && dueDate <= endOfWeek) {
+                groups["🟨 Due-This Week"].push({ ...issue, due: dueStr });
+              } else {
+                groups["🟩 Due-Upcoming Weeks"].push({ ...issue, due: dueStr });
+              }
+            }
+
+            const makeList = (arr) => arr.length
+              ? arr.map(i => `- #${i.number} **${i.title}** (Due: ${i.due})`).join("\\n")
+              : "_No issues_";
+
+            const kanban = `
+### 🗓️ Pending Jobs Kanban View (Updated: ${new Date().toLocaleString()})
+
+**🟥 Over-Due**
+${makeList(groups["🟥 Over-Due"])}
+
+**🟧 Due-Today**
+${makeList(groups["🟧 Due-Today"])}
+
+**🟨 Due-This Week**
+${makeList(groups["🟨 Due-This Week"])}
+
+**🟩 Due-Upcoming Weeks**
+${makeList(groups["🟩 Due-Upcoming Weeks"])}
+`;
+
+            const issueTitle = "📋 Pending Jobs Kanban View";
+
+            const { data: openIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+
+            let tracker = openIssues.find(i => i.title === issueTitle);
+
+            if (tracker) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: tracker.number,
+                body: kanban
+              });
+              console.log(`✅ Updated existing Kanban issue #${tracker.number}`);
+            } else {
+              const { data: newIssue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: kanban
+              });
+              console.log(`🆕 Created new Kanban issue #${newIssue.number}`);
+            }
