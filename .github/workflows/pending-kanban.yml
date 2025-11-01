@@ -51,7 +51,7 @@ jobs:
           # Iterate issues and extract due date (milestone.due_on or body "Due" / "Due Date")
           echo "$issues_json" | jq -c '.[]' | while read -r issue; do
             num=$(echo "$issue" | jq -r '.number')
-            title=$(echo "$issue" | jq -r '.title' | sed 's/"/\\"/g')
+            title=$(echo "$issue" | jq -r '.title' | sed 's/\"/\\\"/g')
 
             # try milestone.due_on first
             due_iso=$(echo "$issue" | jq -r '.milestone.due_on // empty')
@@ -84,37 +84,44 @@ jobs:
             fi
           done
 
-          # Build kanban body safely using a quoted heredoc
-          read -r -d '' KANBAN <<'KAN'
-### 🗓️ Pending Jobs Kanban View (Updated: __UPDATED_AT__)
-**🟥 Over-Due**
-__OVERDUE__
-
-**🟧 Due Today**
-__DUE_TODAY__
-
-**🟨 Due This Week**
-__DUE_WEEK__
-
-**🟩 Due Upcoming Weeks**
-__UPCOMING__
-KAN
-
-          # Replace placeholders
+          # Build the Kanban into a temp file to avoid quoting/heredoc issues
+          OUT=/tmp/kanban.md
           UPDATED_AT="$(date -u +"%Y-%m-%d %H:%M UTC")"
-          KAN=${KAN//'__UPDATED_AT__'/"$UPDATED_AT"}
-          OVERDUE_CONTENT="${OVERDUE:-_No overdue issues_}"
-          DUE_TODAY_CONTENT="${DUE_TODAY:-_No issues due today_}"
-          DUE_WEEK_CONTENT="${DUE_WEEK:-_No issues due this week_}"
-          UPCOMING_CONTENT="${UPCOMING:-_No upcoming issues_}"
 
-          KAN="${KAN//'__OVERDUE__'/"$OVERDUE_CONTENT"}"
-          KAN="${KAN//'__DUE_TODAY__'/"$DUE_TODAY_CONTENT"}"
-          KAN="${KAN//'__DUE_WEEK__'/"$DUE_WEEK_CONTENT"}"
-          KAN="${KAN//'__UPCOMING__'/"$UPCOMING_CONTENT"}"
+          {
+            echo "### 🗓️ Pending Jobs Kanban View (Updated: $UPDATED_AT)"
+            echo
+            echo "**🟥 Over-Due**"
+            if [ -n "$OVERDUE" ]; then
+              echo "$OVERDUE"
+            else
+              echo "_No overdue issues_"
+            fi
+            echo
+            echo "**🟧 Due Today**"
+            if [ -n "$DUE_TODAY" ]; then
+              echo "$DUE_TODAY"
+            else
+              echo "_No issues due today_"
+            fi
+            echo
+            echo "**🟨 Due This Week**"
+            if [ -n "$DUE_WEEK" ]; then
+              echo "$DUE_WEEK"
+            else
+              echo "_No issues due this week_"
+            fi
+            echo
+            echo "**🟩 Due Upcoming Weeks**"
+            if [ -n "$UPCOMING" ]; then
+              echo "$UPCOMING"
+            else
+              echo "_No upcoming issues_"
+            fi
+          } > "$OUT"
 
           echo "----- Kanban body -----"
-          echo "$KAN"
+          cat "$OUT"
           echo "-----------------------"
 
           # Find existing tracker issue by exact title
@@ -122,10 +129,10 @@ KAN
 
           if [ -z "$existing_issue_number" ] || [ "$existing_issue_number" = "null" ]; then
             echo "Creating new issue '📋 Pending Jobs Kanban View'..."
-            gh issue create --repo "$OWNER/$REPO" --title "📋 Pending Jobs Kanban View" --body "$KAN" --label "kanban-view" || true
+            gh issue create --repo "$OWNER/$REPO" --title "📋 Pending Jobs Kanban View" --body-file "$OUT" --label "kanban-view" || true
             echo "✅ Created new Kanban issue."
           else
             echo "Updating existing Kanban issue #$existing_issue_number..."
-            gh issue edit "$existing_issue_number" --repo "$OWNER/$REPO" --body "$KAN" || true
+            gh issue edit "$existing_issue_number" --repo "$OWNER/$REPO" --body-file "$OUT" || true
             echo "🔁 Updated Kanban issue #$existing_issue_number."
           fi
