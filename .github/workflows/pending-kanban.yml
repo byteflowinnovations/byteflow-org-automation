@@ -1,114 +1,84 @@
-name: Reusable - Pending Jobs Kanban
+name: Pending Jobs Kanban Generator
 
 on:
-  workflow_call: {}
+  workflow_call:
 
 jobs:
-  build-kanban:
+  pending-kanban:
     runs-on: ubuntu-latest
 
-    permissions:
-      issues: write
-      contents: read
-
     steps:
-      - name: Check out repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Generate Kanban View
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            (async () => {
-              try {
-                const { data: issues } = await github.rest.issues.listForRepo({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  per_page: 100
-                });
+      - name: Setup GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
 
-                const now = new Date();
-                const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-                const endOfWeek = new Date(today);
-                endOfWeek.setDate(today.getDate() + 7);
+      - name: Generate Pending Jobs Kanban View
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔍 Fetching issues with due dates..."
+          OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO=$(echo "${{ github.repository }}" | cut -d'/' -f2)
 
-                const groups = {
-                  "🟥 Over-Due": [],
-                  "🟧 Due-Today": [],
-                  "🟨 Due-This Week": [],
-                  "🟩 Due-Upcoming Weeks": []
-                };
+          # Get all open issues with due dates (milestone due_on or field name "Due Date")
+          issues=$(gh issue list --repo "$OWNER/$REPO" --state open --json number,title,body,labels,milestone,createdAt)
 
-                for (const issue of issues) {
-                  const match = issue.body?.match(/Due Date:\s*(\d{4}-\d{2}-\d{2})/);
-                  if (!match) continue;
+          today=$(date -u +"%Y-%m-%d")
+          this_week_end=$(date -u -d "next Sunday" +"%Y-%m-%d")
 
-                  const dueStr = match[1];
-                  const dueDate = new Date(dueStr);
+          overdue=""
+          due_today=""
+          due_week=""
+          upcoming=""
 
-                  if (dueDate < today) {
-                    groups["🟥 Over-Due"].push({ number: issue.number, title: issue.title, due: dueStr });
-                  } else if (dueDate.toDateString() === today.toDateString()) {
-                    groups["🟧 Due-Today"].push({ number: issue.number, title: issue.title, due: dueStr });
-                  } else if (dueDate > today && dueDate <= endOfWeek) {
-                    groups["🟨 Due-This Week"].push({ number: issue.number, title: issue.title, due: dueStr });
-                  } else {
-                    groups["🟩 Due-Upcoming Weeks"].push({ number: issue.number, title: issue.title, due: dueStr });
-                  }
-                }
+          # Parse each issue
+          echo "$issues" | jq -c '.[]' | while read -r issue; do
+            num=$(echo "$issue" | jq -r '.number')
+            title=$(echo "$issue" | jq -r '.title')
 
-                const makeList = (arr) => {
-                  if (!arr.length) return "_No issues_";
-                  return arr.map(i => `- #${i.number} **${i.title}** (Due: ${i.due})`).join("\n");
-                };
+            # Attempt to extract due date (from milestone or body tag "Due:")
+            due=$(echo "$issue" | jq -r '.milestone.due_on // empty')
+            if [ -z "$due" ]; then
+              due=$(echo "$issue" | grep -oE "Due[: ]+[0-9]{4}-[0-9]{2}-[0-9]{2}" | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1)
+            fi
 
-                const kanban = [
-                  `### 🗓️ Pending Jobs Kanban View (Updated: ${new Date().toLocaleString()})`,
-                  "",
-                  "**🟥 Over-Due**",
-                  makeList(groups["🟥 Over-Due"]),
-                  "",
-                  "**🟧 Due-Today**",
-                  makeList(groups["🟧 Due-Today"]),
-                  "",
-                  "**🟨 Due-This Week**",
-                  makeList(groups["🟨 Due-This Week"]),
-                  "",
-                  "**🟩 Due-Upcoming Weeks**",
-                  makeList(groups["🟩 Due-Upcoming Weeks"])
-                ].join("\n");
+            if [ -n "$due" ]; then
+              if [[ "$due" < "$today" ]]; then
+                overdue+="\n- #$num $title (Due: $due)"
+              elif [[ "$due" == "$today" ]]; then
+                due_today+="\n- #$num $title (Due: $due)"
+              elif [[ "$due" < "$this_week_end" ]]; then
+                due_week+="\n- #$num $title (Due: $due)"
+              else
+                upcoming+="\n- #$num $title (Due: $due)"
+              fi
+            fi
+          done
 
-                const issueTitle = "📋 Pending Jobs Kanban View";
+          KANBAN="### 🟥 Over-Due
+${overdue:-_No overdue issues_}
 
-                const { data: openIssues } = await github.rest.issues.listForRepo({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  state: 'open',
-                  per_page: 100
-                });
+### 🟧 Due Today
+${due_today:-_No issues due today_}
 
-                let tracker = openIssues.find(i => i.title === issueTitle);
+### 🟨 Due This Week
+${due_week:-_No issues due this week_}
 
-                if (tracker) {
-                  await github.rest.issues.update({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    issue_number: tracker.number,
-                    body: kanban
-                  });
-                  console.log(`✅ Updated existing Kanban issue #${tracker.number}`);
-                } else {
-                  const { data: newIssue } = await github.rest.issues.create({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    title: issueTitle,
-                    body: kanban
-                  });
-                  console.log(`✅ Created new Kanban issue #${newIssue.number}`);
-                }
-              } catch (error) {
-                core.setFailed(`Kanban generation failed: ${error.message}`);
-              }
-            })();
+### 🟩 Due Upcoming Weeks
+${upcoming:-_No upcoming issues_}
+"
+
+          echo "📝 Creating or updating Kanban issue..."
+          issue_number=$(gh issue list --repo "$OWNER/$REPO" --search "Pending Jobs Kanban View" --json number --jq ".[0].number")
+
+          if [ -z "$issue_number" ]; then
+            gh issue create --repo "$OWNER/$REPO" --title "📋 Pending Jobs Kanban View" --body "$KANBAN" --label "kanban-view"
+            echo "✅ Created new Kanban issue."
+          else
+            gh issue edit "$issue_number" --repo "$OWNER/$REPO" --body "$KANBAN"
+            echo "🔁 Updated existing Kanban issue #$issue_number."
+          fi
