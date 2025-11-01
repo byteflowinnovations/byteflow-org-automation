@@ -1,0 +1,22 @@
+name: Reusable - Pending Jobs Kanban
+
+on:
+  workflow_call:  # This allows other repos to invoke it
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  build-kanban:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Generate Kanban View
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // [Same Kanban logic from previous workflow goes here]
