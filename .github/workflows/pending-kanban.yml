@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies (gh, jq)
+      - name: Install gh and jq
         run: |
           sudo apt-get update -y
           sudo apt-get install -y gh jq
@@ -23,101 +23,109 @@ jobs:
       - name: Generate Pending Jobs Kanban View
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          TZ: UTC
         run: |
           set -euo pipefail
 
-          echo "🔍 Determining owner and repo..."
-          # GITHUB_REPOSITORY format is "owner/repo"
+          echo "🔍 Determine owner and repo..."
           OWNER="${GITHUB_REPOSITORY%%/*}"
           REPO="${GITHUB_REPOSITORY##*/}"
           echo "Owner: $OWNER  Repo: $REPO"
 
-          echo "🔍 Fetching open issues (number, title, body, milestone)..."
+          echo "🔍 Fetching open issues..."
           issues_json=$(gh issue list --repo "$OWNER/$REPO" --state open --limit 100 --json number,title,body,milestone)
 
-          # prepare containers
-          overdue=""
-          due_today=""
-          due_week=""
-          upcoming=""
+          # Prepare containers
+          OVERDUE=""
+          DUE_TODAY=""
+          DUE_WEEK=""
+          UPCOMING=""
 
-          # compute date boundaries in UTC YYYY-MM-DD
-          today=$(date -u +"%Y-%m-%d")
-          # end of week: 7 days from today (inclusive)
-          week_end=$(date -u -d "$today +7 days" +"%Y-%m-%d")
+          # Dates (UTC, YYYY-MM-DD)
+          TODAY=$(date -u +"%Y-%m-%d")
+          WEEK_END=$(date -u -d "$TODAY +7 days" +"%Y-%m-%d")
 
-          echo "Today (UTC): $today"
-          echo "Week end (UTC): $week_end"
+          echo "Today (UTC): $TODAY"
+          echo "Week end (UTC): $WEEK_END"
 
-          # iterate issues
+          # Iterate issues and extract due date (milestone.due_on or body "Due" / "Due Date")
           echo "$issues_json" | jq -c '.[]' | while read -r issue; do
             num=$(echo "$issue" | jq -r '.number')
-            title=$(echo "$issue" | jq -r '.title')
+            title=$(echo "$issue" | jq -r '.title' | sed 's/"/\\"/g')
 
-            # Try milestone.due_on first (ISO 8601), then look for "Due" marker in body like "Due: 2025-11-01" or "Due Date: 2025-11-01"
-            due=$(echo "$issue" | jq -r '.milestone.due_on // empty')
-            if [ -z "$due" ]; then
-              # extract first YYYY-MM-DD in body after a "Due" or "Due Date" label (case-insensitive)
+            # try milestone.due_on first
+            due_iso=$(echo "$issue" | jq -r '.milestone.due_on // empty')
+            if [ -z "$due_iso" ]; then
               body=$(echo "$issue" | jq -r '.body // empty')
-              due=$(echo "$body" | grep -ioE "Due Date[: ]+[0-9]{4}-[0-9]{2}-[0-9]{2}" | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 || true)
-              if [ -z "$due" ]; then
-                due=$(echo "$body" | grep -ioE "Due[: ]+[0-9]{4}-[0-9]{2}-[0-9]{2}" | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 || true)
+              # find first YYYY-MM-DD after "Due" or "Due Date" (case-insensitive)
+              due_iso=$(echo "$body" | grep -ioE "Due Date[: ]+[0-9]{4}-[0-9]{2}-[0-9]{2}" | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 || true)
+              if [ -z "$due_iso" ]; then
+                due_iso=$(echo "$body" | grep -ioE "Due[: ]+[0-9]{4}-[0-9]{2}-[0-9]{2}" | grep -oE "[0-9]{4}-[0-9]{2}-[0-9]{2}" | head -1 || true)
               fi
             fi
 
-            # normalize due date to YYYY-MM-DD (strip time if present)
-            if [ -n "$due" ]; then
-              # if due contains time part (e.g., 2025-11-01T00:00:00Z), extract date part
-              due_date=$(echo "$due" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}')
+            # normalize to YYYY-MM-DD
+            if [ -n "$due_iso" ]; then
+              due_date=$(echo "$due_iso" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}')
             else
               due_date=""
             fi
 
             if [ -n "$due_date" ]; then
-              if [[ "$due_date" < "$today" ]]; then
-                overdue+=$'\n'"- #$num $title (Due: $due_date)"
-              elif [[ "$due_date" == "$today" ]]; then
-                due_today+=$'\n'"- #$num $title (Due: $due_date)"
-              elif [[ "$due_date" > "$today" && "$due_date" <= "$week_end" ]]; then
-                due_week+=$'\n'"- #$num $title (Due: $due_date)"
+              if [[ "$due_date" < "$TODAY" ]]; then
+                OVERDUE+=$'\n'"- #$num $title (Due: $due_date)"
+              elif [[ "$due_date" == "$TODAY" ]]; then
+                DUE_TODAY+=$'\n'"- #$num $title (Due: $due_date)"
+              elif [[ "$due_date" > "$TODAY" && "$due_date" <= "$WEEK_END" ]]; then
+                DUE_WEEK+=$'\n'"- #$num $title (Due: $due_date)"
               else
-                upcoming+=$'\n'"- #$num $title (Due: $due_date)"
+                UPCOMING+=$'\n'"- #$num $title (Due: $due_date)"
               fi
             fi
           done
 
-          # build kanban body
-          KANBAN=$(cat <<EOF
-### 🗓️ Pending Jobs Kanban View (Updated: $(date -u +"%Y-%m-%d %H:%M UTC"))
-
+          # Build kanban body safely using a quoted heredoc
+          read -r -d '' KANBAN <<'KAN'
+### 🗓️ Pending Jobs Kanban View (Updated: __UPDATED_AT__)
 **🟥 Over-Due**
-${overdue:-_No overdue issues_}
+__OVERDUE__
 
 **🟧 Due Today**
-${due_today:-_No issues due today_}
+__DUE_TODAY__
 
 **🟨 Due This Week**
-${due_week:-_No issues due this week_}
+__DUE_WEEK__
 
 **🟩 Due Upcoming Weeks**
-${upcoming:-_No upcoming issues_}
-EOF
-)
+__UPCOMING__
+KAN
 
-          echo "📝 Kanban content prepared:"
-          echo "---------------------------------"
-          echo "$KANBAN"
-          echo "---------------------------------"
+          # Replace placeholders
+          UPDATED_AT="$(date -u +"%Y-%m-%d %H:%M UTC")"
+          KAN=${KAN//'__UPDATED_AT__'/"$UPDATED_AT"}
+          OVERDUE_CONTENT="${OVERDUE:-_No overdue issues_}"
+          DUE_TODAY_CONTENT="${DUE_TODAY:-_No issues due today_}"
+          DUE_WEEK_CONTENT="${DUE_WEEK:-_No issues due this week_}"
+          UPCOMING_CONTENT="${UPCOMING:-_No upcoming issues_}"
 
-          # find existing tracker issue by exact title
+          KAN="${KAN//'__OVERDUE__'/"$OVERDUE_CONTENT"}"
+          KAN="${KAN//'__DUE_TODAY__'/"$DUE_TODAY_CONTENT"}"
+          KAN="${KAN//'__DUE_WEEK__'/"$DUE_WEEK_CONTENT"}"
+          KAN="${KAN//'__UPCOMING__'/"$UPCOMING_CONTENT"}"
+
+          echo "----- Kanban body -----"
+          echo "$KAN"
+          echo "-----------------------"
+
+          # Find existing tracker issue by exact title
           existing_issue_number=$(gh issue list --repo "$OWNER/$REPO" --state open --search "📋 Pending Jobs Kanban View" --json number --jq '.[0].number' 2>/dev/null || true)
 
           if [ -z "$existing_issue_number" ] || [ "$existing_issue_number" = "null" ]; then
             echo "Creating new issue '📋 Pending Jobs Kanban View'..."
-            gh issue create --repo "$OWNER/$REPO" --title "📋 Pending Jobs Kanban View" --body "$KANBAN" --label "kanban-view" || true
+            gh issue create --repo "$OWNER/$REPO" --title "📋 Pending Jobs Kanban View" --body "$KAN" --label "kanban-view" || true
             echo "✅ Created new Kanban issue."
           else
             echo "Updating existing Kanban issue #$existing_issue_number..."
-            gh issue edit "$existing_issue_number" --repo "$OWNER/$REPO" --body "$KANBAN" || true
+            gh issue edit "$existing_issue_number" --repo "$OWNER/$REPO" --body "$KAN" || true
             echo "🔁 Updated Kanban issue #$existing_issue_number."
           fi
